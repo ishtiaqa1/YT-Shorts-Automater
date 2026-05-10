@@ -9,7 +9,10 @@ export function startUploadScheduler() {
               y.refresh_token
        FROM scheduled_uploads su
        JOIN projects p ON p.id = su.project_id
-       JOIN youtube_connections y ON y.user_id = su.user_id
+       LEFT JOIN youtube_connections y ON y.id = COALESCE(
+         su.youtube_connection_id,
+         (SELECT id FROM youtube_connections WHERE user_id = su.user_id AND is_default = true LIMIT 1)
+       )
        WHERE su.status = 'pending'
          AND p.output_video_path IS NOT NULL
          AND p.status = 'ready'
@@ -20,7 +23,7 @@ export function startUploadScheduler() {
       if (!row.output_video_path || !row.refresh_token) {
         await pool.query(`UPDATE scheduled_uploads SET status = 'failed', last_error = $2 WHERE id = $1`, [
           row.id,
-          'Missing rendered video or YouTube connection',
+          'Missing rendered video or YouTube channel (connect in Settings or choose a channel when scheduling).',
         ]);
         continue;
       }

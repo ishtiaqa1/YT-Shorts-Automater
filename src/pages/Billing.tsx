@@ -41,8 +41,9 @@ export default function Billing() {
             id (<code>price_…</code>), not the product id.
           </li>
           <li>
-            <strong>PUBLIC_APP_URL</strong> — e.g. <code>http://localhost:5173</code> for local (must match where users
-            land after Checkout).
+            <strong>PUBLIC_APP_URL</strong> — SPA origin only, e.g. <code>http://localhost:5173</code> (no{' '}
+            <code>/app</code> path). Must match the address bar (including <code>localhost</code> vs{' '}
+            <code>127.0.0.1</code>) so redirects land with your session.
           </li>
           <li>
             <strong>STRIPE_WEBHOOK_SECRET</strong> — Developers → Webhooks → add endpoint{' '}

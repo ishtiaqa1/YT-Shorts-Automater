@@ -2,7 +2,8 @@ import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { spawn } from 'child_process';
 import { synthesizeSpeech } from './tts.js';
-import { buildSrtFromScript } from './captioning.js';
+import { buildAssFromScript } from './captioning.js';
+import { ffmpegPath, ffprobePath } from '../ffmpegBin.js';
 
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -30,7 +31,7 @@ async function ffprobeMediaDuration(mediaPath) {
     mediaPath,
   ];
   return new Promise((resolve, reject) => {
-    const p = spawn('ffprobe', args);
+    const p = spawn(ffprobePath(), args);
     let out = '';
     let err = '';
     p.stdout?.on('data', (d) => {
@@ -56,7 +57,7 @@ async function ensureDefaultBackground(bgDir) {
   mkdirSync(bgDir, { recursive: true });
   const p = join(bgDir, '_default_vertical.mp4');
   if (existsSync(p)) return p;
-  await run('ffmpeg', [
+  await run(ffmpegPath(), [
     '-y',
     '-f',
     'lavfi',
@@ -81,18 +82,31 @@ async function ensureDefaultBackground(bgDir) {
  */
 export async function renderShort({
   scriptText,
+  /** Text used only for burned-in SRT; defaults to scriptText when omitted (same as spoken). */
+  captionScriptText,
   workDir,
   backgroundPath,
   outputFilename = 'short.mp4',
+  onProgress,
+  captionSettings,
 }) {
   mkdirSync(workDir, { recursive: true });
 
-  const { audioPath } = await synthesizeSpeech(scriptText, workDir);
-  const duration = await ffprobeMediaDuration(audioPath);
-  const srtContent = buildSrtFromScript(scriptText, duration);
-  const srtPath = join(workDir, 'captions.srt');
-  writeFileSync(srtPath, srtContent, 'utf8');
+  const tick = async (pct, phase) => {
+    if (typeof onProgress === 'function') await onProgress(pct, phase);
+  };
 
+  await tick(12, 'Synthesizing speech…');
+  const { audioPath } = await synthesizeSpeech(scriptText, workDir);
+  await tick(36, 'Timing captions…');
+  const duration = await ffprobeMediaDuration(audioPath);
+  const burnText = captionScriptText != null ? captionScriptText : scriptText;
+  /** ASS (not SRT): libass centers with Style Alignment=5; SRT+force_style often stays bottom-aligned. */
+  const assContent = buildAssFromScript(burnText, duration, captionSettings);
+  const assPath = join(workDir, 'captions.ass');
+  writeFileSync(assPath, `\ufeff${assContent}`, 'utf8');
+
+  await tick(46, 'Preparing background…');
   let bg =
     backgroundPath && existsSync(backgroundPath)
       ? backgroundPath
@@ -100,10 +114,9 @@ export async function renderShort({
 
   const outPath = join(workDir, outputFilename);
 
-  /** Bottom-centered captions with extra bottom margin (Shorts player chrome safe-ish zone). */
   const vf = [
     `[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bg]`,
-    `[bg]subtitles=captions.srt:force_style='FontName=Arial Black,FontSize=22,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=3,Shadow=1,Alignment=2,MarginV=168'[vout]`,
+    `[bg]subtitles=captions.ass[vout]`,
   ].join(';');
 
   const padSec = 0.35;
@@ -134,8 +147,9 @@ export async function renderShort({
     bgInputArgs = ['-stream_loop', '-1', '-i', bg];
   }
 
+  await tick(58, 'Encoding video…');
   await run(
-    'ffmpeg',
+    ffmpegPath(),
     [
       ...argsPrefix,
       ...bgInputArgs,
@@ -165,5 +179,6 @@ export async function renderShort({
     { cwd: workDir }
   );
 
+  await tick(98, 'Finishing…');
   return { outPath, durationSeconds: duration };
 }

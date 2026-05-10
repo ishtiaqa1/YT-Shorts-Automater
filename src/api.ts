@@ -11,7 +11,12 @@ export async function api<T = unknown>(path: string, opts: RequestInit = {}): Pr
     headers.set('Content-Type', 'application/json');
   }
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const res = await fetch(`${base}${path}`, { ...opts, headers });
+  const res = await fetch(`${base}${path}`, {
+    ...opts,
+    headers,
+    /** Avoid stale GET responses overwriting in-flight UI after PATCH (caption_settings etc.). */
+    cache: opts.cache ?? 'no-store',
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error((err as { error?: string }).error || res.statusText);

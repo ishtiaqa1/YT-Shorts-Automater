@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import Stripe from 'stripe';
+import { appPublicOrigin } from '../appPublicUrl.js';
 import { pool } from '../db.js';
 import { authRequired } from '../middleware/auth.js';
 
@@ -18,12 +19,12 @@ r.post('/checkout', authRequired, async (req, res) => {
     res.status(503).json({ error: 'Stripe not configured (STRIPE_SECRET_KEY, STRIPE_PRICE_PRO)' });
     return;
   }
-  const appUrl = process.env.PUBLIC_APP_URL || 'http://localhost:5173';
+  const origin = appPublicOrigin();
   const session = await s.checkout.sessions.create({
     mode: 'subscription',
     line_items: [{ price, quantity: 1 }],
-    success_url: `${appUrl}/billing?success=1`,
-    cancel_url: `${appUrl}/billing?canceled=1`,
+    success_url: `${origin}/app/billing?success=1`,
+    cancel_url: `${origin}/app/billing?canceled=1`,
     customer_email: req.user.email,
     client_reference_id: req.user.sub,
     metadata: { user_id: req.user.sub },

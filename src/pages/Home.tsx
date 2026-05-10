@@ -30,8 +30,10 @@ export default function Home() {
             matching <code>.env</code>.
           </li>
           <li>
-            <strong>TTS</strong>: optional <code>GOOGLE_TTS_API_KEY</code> (Google Cloud Text-to-Speech); on
-            Windows the API falls back to system speech without it.
+            <strong>TTS</strong>: Google Cloud Text-to-Speech —{' '}
+            <code>GOOGLE_TTS_USE_ADC=1</code> + <code>gcloud auth application-default login</code> if your org blocks
+            service account keys; or <code>GOOGLE_TTS_API_KEY</code>; or a JSON path if keys are allowed. On Windows the
+            API falls back to system speech if none are set.
           </li>
         </ul>
       </section>

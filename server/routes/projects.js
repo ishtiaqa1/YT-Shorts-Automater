@@ -5,6 +5,7 @@ import { mkdirSync, existsSync, readdirSync, statSync } from 'fs';
 import { pool } from '../db.js';
 import { authRequired } from '../middleware/auth.js';
 import { enqueueRender } from '../services/jobQueue.js';
+import { normalizeCaptionSettings } from '../captionDefaults.js';
 
 const r = Router();
 r.use(authRequired);
@@ -70,7 +71,13 @@ r.post('/', async (req, res) => {
      RETURNING *`,
     [req.user.sub, String(title).slice(0, 200), String(script_text)]
   );
-  res.json({ project: rows[0] });
+  const proj = rows[0];
+  await pool.query(
+    `INSERT INTO upload_diagnostics (scheduled_upload_id, user_id, metric, value_json)
+     VALUES (NULL, $1, 'project_created', $2::jsonb)`,
+    [req.user.sub, JSON.stringify({ projectId: proj.id, title: proj.title })]
+  );
+  res.json({ project: proj });
 });
 
 r.get('/background-presets', (_req, res) => {
@@ -144,6 +151,75 @@ r.get('/:id/file', async (req, res) => {
   res.sendFile(p.output_video_path);
 });
 
+r.patch('/:id', async (req, res) => {
+  const { id } = req.params;
+  const body = req.body || {};
+  const { caption_settings, script_text, title } = body;
+  const hasCaption =
+    caption_settings !== undefined && caption_settings !== null && typeof caption_settings === 'object';
+  const hasScript = typeof script_text === 'string';
+  const hasTitle = typeof title === 'string';
+  const hasCaptionTextKey = Object.prototype.hasOwnProperty.call(body, 'caption_text');
+
+  if (!hasCaption && !hasScript && !hasTitle && !hasCaptionTextKey) {
+    res.status(400).json({ error: 'Provide caption_settings, script_text, title, and/or caption_text' });
+    return;
+  }
+
+  const { rows: existing } = await pool.query(
+    `SELECT caption_settings, script_text, title FROM projects WHERE id = $1 AND user_id = $2`,
+    [id, req.user.sub]
+  );
+  if (!existing[0]) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+
+  const updates = [];
+  const params = [];
+  let n = 1;
+
+  if (hasTitle) {
+    updates.push(`title = $${n++}`);
+    params.push(String(title).slice(0, 200));
+  }
+  if (hasScript) {
+    updates.push(`script_text = $${n++}`);
+    params.push(String(script_text));
+  }
+  if (hasCaption) {
+    const merged = {
+      ...(existing[0].caption_settings && typeof existing[0].caption_settings === 'object'
+        ? existing[0].caption_settings
+        : {}),
+      ...caption_settings,
+    };
+    const normalized = normalizeCaptionSettings(merged);
+    updates.push(`caption_settings = $${n++}::jsonb`);
+    params.push(JSON.stringify(normalized));
+  }
+
+  if (hasCaptionTextKey) {
+    if (body.caption_text === null) {
+      updates.push(`caption_text = $${n++}`);
+      params.push(null);
+    } else if (typeof body.caption_text === 'string') {
+      updates.push(`caption_text = $${n++}`);
+      params.push(body.caption_text);
+    } else {
+      res.status(400).json({ error: 'caption_text must be a string or null' });
+      return;
+    }
+  }
+
+  updates.push('updated_at = NOW()');
+  params.push(id, req.user.sub);
+
+  const sql = `UPDATE projects SET ${updates.join(', ')} WHERE id = $${n++} AND user_id = $${n++} RETURNING *`;
+  const { rows } = await pool.query(sql, params);
+  res.json({ project: rows[0] });
+});
+
 r.get('/:id', async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM projects WHERE id = $1 AND user_id = $2`, [
     req.params.id,
@@ -158,10 +234,22 @@ r.get('/:id', async (req, res) => {
 
 r.post('/:id/schedule', async (req, res) => {
   const { id } = req.params;
-  const { scheduled_at, title, description, tags, privacy_status } = req.body || {};
+  const { scheduled_at, title, description, tags, privacy_status, youtube_connection_id } = req.body || {};
   if (!scheduled_at) {
     res.status(400).json({ error: 'scheduled_at ISO datetime required' });
     return;
+  }
+  let ytConnId = null;
+  if (youtube_connection_id) {
+    const { rows: yc } = await pool.query(
+      `SELECT id FROM youtube_connections WHERE id = $1 AND user_id = $2`,
+      [youtube_connection_id, req.user.sub]
+    );
+    if (!yc[0]) {
+      res.status(400).json({ error: 'Invalid youtube_connection_id' });
+      return;
+    }
+    ytConnId = yc[0].id;
   }
   const { rows: pr } = await pool.query(
     `SELECT * FROM projects WHERE id = $1 AND user_id = $2`,
@@ -179,12 +267,13 @@ r.post('/:id/schedule', async (req, res) => {
 
   const { rows } = await pool.query(
     `INSERT INTO scheduled_uploads
-      (project_id, user_id, scheduled_at, title, description, tags, privacy_status, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+      (project_id, user_id, youtube_connection_id, scheduled_at, title, description, tags, privacy_status, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
      RETURNING *`,
     [
       id,
       req.user.sub,
+      ytConnId,
       new Date(scheduled_at),
       title || project.title,
       description || null,
@@ -192,7 +281,22 @@ r.post('/:id/schedule', async (req, res) => {
       privacy_status || 'private',
     ]
   );
-  res.json({ scheduled: rows[0] });
+  const scheduled = rows[0];
+  await pool.query(
+    `INSERT INTO upload_diagnostics (scheduled_upload_id, user_id, metric, value_json)
+     VALUES ($1, $2, 'upload_scheduled', $3::jsonb)`,
+    [
+      scheduled.id,
+      req.user.sub,
+      JSON.stringify({
+        projectId: id,
+        projectTitle: project.title,
+        title: scheduled.title,
+        scheduledAt: scheduled.scheduled_at.toISOString(),
+      }),
+    ]
+  );
+  res.json({ scheduled });
 });
 
 export default r;

@@ -1,6 +1,8 @@
-import { writeFileSync, readFileSync, unlinkSync, mkdirSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { spawn } from 'child_process';
+import { GoogleAuth } from 'google-auth-library';
+import { ffmpegPath } from '../ffmpegBin.js';
 
 function runCmd(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -39,7 +41,23 @@ function splitTextForGoogleTts(text) {
   return parts.filter(Boolean);
 }
 
-async function googleCloudTtsToMp3(text, apiKey, workDir) {
+const TTS_URL = 'https://texttospeech.googleapis.com/v1/text:synthesize';
+
+/** Required for user ADC so quota/billing attach to your GCP project (see adc-troubleshooting). */
+function quotaProjectId() {
+  return (
+    process.env.GOOGLE_CLOUD_QUOTA_PROJECT?.trim() ||
+    process.env.GOOGLE_TTS_QUOTA_PROJECT?.trim() ||
+    ''
+  );
+}
+
+/**
+ * @param {string} text
+ * @param {string} workDir
+ * @param {{ mode: 'apikey', key: string } | { mode: 'bearer', getToken: () => Promise<string> }} auth
+ */
+async function googleCloudTtsToMp3(text, workDir, auth) {
   const mp3Path = join(workDir, 'voice.mp3');
   const languageCode = process.env.GOOGLE_TTS_LANGUAGE_CODE || 'en-US';
   const voiceName = process.env.GOOGLE_TTS_VOICE_NAME || 'en-US-Neural2-D';
@@ -50,10 +68,21 @@ async function googleCloudTtsToMp3(text, apiKey, workDir) {
 
   try {
     for (let i = 0; i < chunks.length; i++) {
-      const url = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(apiKey)}`;
+      const headers = { 'Content-Type': 'application/json' };
+      let url = TTS_URL;
+      if (auth.mode === 'apikey') {
+        url = `${TTS_URL}?key=${encodeURIComponent(auth.key)}`;
+      } else {
+        headers.Authorization = `Bearer ${await auth.getToken()}`;
+        const qp = quotaProjectId();
+        if (qp) {
+          headers['x-goog-user-project'] = qp;
+        }
+      }
+
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           input: { text: chunks[i] },
           voice: { languageCode, name: voiceName },
@@ -65,7 +94,23 @@ async function googleCloudTtsToMp3(text, apiKey, workDir) {
       });
       const raw = await res.text();
       if (!res.ok) {
-        throw new Error(`Google TTS HTTP ${res.status}: ${raw.slice(0, 500)}`);
+        let msg = `Google TTS HTTP ${res.status}: ${raw.slice(0, 800)}`;
+        if (
+          auth.mode === 'apikey' &&
+          (raw.includes('API_KEY_INVALID') || raw.includes('API key expired'))
+        ) {
+          msg +=
+            ' Tip: Fix API key restrictions (must include Cloud Text-to-Speech API), or use GOOGLE_TTS_USE_ADC=1 after running `gcloud auth application-default login` if org policy blocks service account keys.';
+        }
+        if (
+          res.status === 403 &&
+          raw.includes('quota project') &&
+          auth.mode === 'bearer'
+        ) {
+          msg +=
+            ' Fix: set GOOGLE_CLOUD_QUOTA_PROJECT to your GCP project id (same project where TTS is enabled), or run: gcloud auth application-default set-quota-project YOUR_PROJECT_ID';
+        }
+        throw new Error(msg);
       }
       let data;
       try {
@@ -91,7 +136,7 @@ async function googleCloudTtsToMp3(text, apiKey, workDir) {
     const listBody = partPaths.map((p) => `file '${p.replace(/\\/g, '/')}'`).join('\n');
     writeFileSync(listPath, listBody);
     await runCmd(
-      'ffmpeg',
+      ffmpegPath(),
       ['-y', '-f', 'concat', '-safe', '0', '-i', 'voice_concat.txt', '-c', 'copy', 'voice.mp3'],
       { cwd: workDir }
     );
@@ -136,15 +181,60 @@ export async function synthesizeSpeech(text, workDir) {
   const wavPath = join(workDir, 'voice.wav');
   const mp3Path = join(workDir, 'voice.mp3');
 
-  const googleKey = process.env.GOOGLE_TTS_API_KEY;
-  if (googleKey) {
-    await googleCloudTtsToMp3(text, googleKey, workDir);
+  const saPath = (
+    process.env.GOOGLE_TTS_SERVICE_ACCOUNT_PATH ||
+    process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+    ''
+  ).trim();
+  const apiKey = (process.env.GOOGLE_TTS_API_KEY || '').trim();
+  const useAdc =
+    process.env.GOOGLE_TTS_USE_ADC === '1' ||
+    process.env.GOOGLE_TTS_USE_APPLICATION_DEFAULT_CREDENTIALS === '1';
+
+  async function bearerFromGoogleAuth(googleAuth, label) {
+    await googleCloudTtsToMp3(text, workDir, {
+      mode: 'bearer',
+      getToken: async () => {
+        const client = await googleAuth.getClient();
+        const at = await client.getAccessToken();
+        if (!at.token) {
+          throw new Error(
+            `Google TTS: no access token (${label}). For ADC run: gcloud auth application-default login — ensure Cloud Text-to-Speech API is enabled and your user has permission on the project.`
+          );
+        }
+        return at.token;
+      },
+    });
+  }
+
+  if (saPath) {
+    if (!existsSync(saPath)) {
+      throw new Error(`Google TTS: service account JSON not found at path: ${saPath}`);
+    }
+    const googleAuth = new GoogleAuth({
+      keyFile: saPath,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    await bearerFromGoogleAuth(googleAuth, 'service account file');
+    return { audioPath: mp3Path, format: 'mp3' };
+  }
+
+  if (useAdc) {
+    const googleAuth = new GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+    });
+    await bearerFromGoogleAuth(googleAuth, 'application default credentials');
+    return { audioPath: mp3Path, format: 'mp3' };
+  }
+
+  if (apiKey) {
+    await googleCloudTtsToMp3(text, workDir, { mode: 'apikey', key: apiKey });
     return { audioPath: mp3Path, format: 'mp3' };
   }
 
   if (process.platform === 'win32') {
     await windowsSapiWav(text, wavPath);
-    await runCmd('ffmpeg', [
+    await runCmd(ffmpegPath(), [
       '-y',
       '-i',
       wavPath,
@@ -161,18 +251,18 @@ export async function synthesizeSpeech(text, workDir) {
   if (process.platform === 'darwin') {
     const aiff = join(workDir, 'voice.aiff');
     await runCmd('say', ['-o', aiff, text]);
-    await runCmd('ffmpeg', ['-y', '-i', aiff, '-codec:a', 'libmp3lame', '-q:a', '4', mp3Path]);
+    await runCmd(ffmpegPath(), ['-y', '-i', aiff, '-codec:a', 'libmp3lame', '-q:a', '4', mp3Path]);
     return { audioPath: mp3Path, format: 'mp3' };
   }
 
   // Linux: espeak-ng if present
   try {
     await runCmd('espeak-ng', ['-w', wavPath, text]);
-    await runCmd('ffmpeg', ['-y', '-i', wavPath, '-codec:a', 'libmp3lame', '-q:a', '4', mp3Path]);
+    await runCmd(ffmpegPath(), ['-y', '-i', wavPath, '-codec:a', 'libmp3lame', '-q:a', '4', mp3Path]);
     return { audioPath: mp3Path, format: 'mp3' };
   } catch {
     throw new Error(
-      'No TTS available. Set GOOGLE_TTS_API_KEY (Google Cloud Text-to-Speech), or install espeak-ng (Linux), or run on Windows/macOS.'
+      'No TTS available. Set GOOGLE_TTS_USE_ADC=1 and run gcloud auth application-default login, or GOOGLE_TTS_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS (JSON path if your org allows keys), or install espeak-ng (Linux), or run on Windows/macOS.'
     );
   }
 }

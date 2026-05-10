@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 
@@ -13,6 +13,7 @@ type Project = {
 
 export default function Dashboard() {
   const { logout } = useAuth();
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
   const [title, setTitle] = useState('');
   const [script, setScript] = useState('');
@@ -31,13 +32,14 @@ export default function Dashboard() {
     e.preventDefault();
     setErr('');
     try {
-      await api('/api/projects', {
+      const { project } = await api<{ project: { id: string } }>('/api/projects', {
         method: 'POST',
         body: JSON.stringify({ title, script_text: script }),
       });
       setTitle('');
       setScript('');
       await load();
+      navigate(`/app/project/${project.id}`);
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : 'Error');
     }

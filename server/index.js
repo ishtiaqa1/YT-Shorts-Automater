@@ -10,6 +10,7 @@ import youtubeRoutes from './routes/youtube.js';
 import diagnosticsRoutes from './routes/diagnostics.js';
 import billingRoutes, { stripeWebhook } from './routes/billing.js';
 import { startUploadScheduler } from './services/scheduler.js';
+import { googleOAuthEnvFromProcess } from './oauthEnv.js';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -43,6 +44,18 @@ app.use('/api/youtube', youtubeRoutes);
 app.use('/api/diagnostics', diagnosticsRoutes);
 app.use('/api/billing', billingRoutes);
 
+function logYouTubeOAuthEnvHint() {
+  const { clientId: id, clientSecret: secret, redirectUri } = googleOAuthEnvFromProcess();
+  if (!id) return;
+  const suffix = id.length > 28 ? `…${id.slice(-28)}` : id;
+  const redir = redirectUri ? `redirect_uri=${redirectUri}` : 'redirect_uri=(missing)';
+  console.log(
+    `[YouTube OAuth env] client_id ends with ${suffix} · client_secret length=${secret?.length ?? 0} · ${redir} · ` +
+      `values use the same cleaning as token exchange (BOM/CR/quotes stripped). ` +
+      `Do not put inline # comments after secrets on the same line in .env.`
+  );
+}
+
 async function main() {
   if (!process.env.JWT_SECRET) {
     console.warn('WARNING: JWT_SECRET is not set');
@@ -51,6 +64,7 @@ async function main() {
     console.error('DATABASE_URL missing');
     process.exit(1);
   }
+  logYouTubeOAuthEnvHint();
   await initDb();
   startUploadScheduler();
   app.listen(port, () => {

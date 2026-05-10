@@ -1,11 +1,10 @@
 import { google } from 'googleapis';
 import { createReadStream } from 'fs';
 import { basename } from 'path';
+import { googleOAuthEnvFromProcess } from '../oauthEnv.js';
 
 export function getOAuthClient() {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const redirectUri = process.env.YOUTUBE_REDIRECT_URI;
+  const { clientId, clientSecret, redirectUri } = googleOAuthEnvFromProcess();
   if (!clientId || !clientSecret || !redirectUri) {
     throw new Error('YouTube OAuth env vars missing (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, YOUTUBE_REDIRECT_URI)');
   }
@@ -17,7 +16,12 @@ export function authUrl(state) {
   return oauth2.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
-    scope: ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly'],
+    scope: [
+      'https://www.googleapis.com/auth/youtube.upload',
+      'https://www.googleapis.com/auth/youtube.readonly',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+    ],
     state,
   });
 }
@@ -26,6 +30,14 @@ export async function exchangeCode(code) {
   const oauth2 = getOAuthClient();
   const { tokens } = await oauth2.getToken(code);
   oauth2.setCredentials(tokens);
+  let google_account_email = null;
+  try {
+    const oauth2User = google.oauth2({ version: 'v2', auth: oauth2 });
+    const { data } = await oauth2User.userinfo.get();
+    google_account_email = data.email || null;
+  } catch {
+    /* optional if scopes missing */
+  }
   const youtube = google.youtube({ version: 'v3', auth: oauth2 });
   const ch = await youtube.channels.list({ part: ['snippet'], mine: true });
   const item = ch.data.items?.[0];
@@ -33,6 +45,7 @@ export async function exchangeCode(code) {
     refresh_token: tokens.refresh_token || null,
     channel_id: item?.id || null,
     channel_title: item?.snippet?.title || null,
+    google_account_email,
   };
 }
 

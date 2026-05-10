@@ -9,7 +9,13 @@ import {
 } from 'react';
 import { api, getToken } from './api';
 
-export type User = { id: string; email: string; display_name: string | null; plan: string };
+export type User = {
+  id: string;
+  email: string;
+  display_name: string | null;
+  plan: string;
+  timezone?: string;
+};
 
 type AuthState = {
   user: User | null;
@@ -18,6 +24,7 @@ type AuthState = {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, display_name?: string) => Promise<void>;
   logout: () => void;
+  refreshUser: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -69,6 +76,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    const t = getToken();
+    if (!t) return;
+    const d = await api<{ user: User }>('/api/auth/me');
+    setUser(d.user);
+  }, []);
+
   const value = useMemo(
     () => ({
       user,
@@ -77,8 +91,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       register,
       logout,
+      refreshUser,
     }),
-    [user, token, loading, login, register, logout]
+    [user, token, loading, login, register, logout, refreshUser]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -6,9 +6,15 @@ import { authRequired } from '../middleware/auth.js';
 
 const r = Router();
 
+function isValidTimezone(tz) {
+  if (tz === 'UTC') return true;
+  if (tz.length < 5 || tz.length > 64 || !tz.includes('/')) return false;
+  return /^[A-Za-z][A-Za-z0-9_]*(\/[A-Za-z0-9_+\-]+)+$/.test(tz);
+}
+
 r.get('/me', authRequired, async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, email, display_name, plan FROM users WHERE id = $1`,
+    `SELECT id, email, display_name, plan, timezone FROM users WHERE id = $1`,
     [req.user.sub]
   );
   const user = rows[0];
@@ -17,6 +23,43 @@ r.get('/me', authRequired, async (req, res) => {
     return;
   }
   res.json({ user });
+});
+
+r.patch('/me', authRequired, async (req, res) => {
+  const { display_name, timezone } = req.body || {};
+  if (display_name === undefined && timezone === undefined) {
+    res.status(400).json({ error: 'Provide display_name and/or timezone' });
+    return;
+  }
+  if (timezone !== undefined && timezone !== null) {
+    const tz = String(timezone).trim();
+    if (!isValidTimezone(tz)) {
+      res.status(400).json({ error: 'timezone must be UTC or an IANA name like America/New_York' });
+      return;
+    }
+  }
+  const sets = [];
+  const vals = [req.user.sub];
+  let i = 2;
+  if (display_name !== undefined) {
+    sets.push(`display_name = $${i}`);
+    vals.push(display_name === null || display_name === '' ? null : String(display_name).slice(0, 120));
+    i += 1;
+  }
+  if (timezone !== undefined) {
+    sets.push(`timezone = $${i}`);
+    vals.push(String(timezone).trim());
+    i += 1;
+  }
+  const { rows } = await pool.query(
+    `UPDATE users SET ${sets.join(', ')} WHERE id = $1 RETURNING id, email, display_name, plan, timezone`,
+    vals
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+  res.json({ user: rows[0] });
 });
 
 r.post('/register', async (req, res) => {
@@ -29,7 +72,7 @@ r.post('/register', async (req, res) => {
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
       `INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3)
-       RETURNING id, email, display_name, plan`,
+       RETURNING id, email, display_name, plan, timezone`,
       [email.trim().toLowerCase(), hash, display_name || null]
     );
     const user = rows[0];
@@ -54,7 +97,10 @@ r.post('/login', async (req, res) => {
       res.status(400).json({ error: 'email and password required' });
       return;
     }
-    const { rows } = await pool.query(`SELECT * FROM users WHERE email = $1`, [email.trim().toLowerCase()]);
+    const { rows } = await pool.query(
+      `SELECT id, email, display_name, plan, password_hash, timezone FROM users WHERE email = $1`,
+      [email.trim().toLowerCase()]
+    );
     const user = rows[0];
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
       res.status(401).json({ error: 'Invalid credentials' });
@@ -65,7 +111,13 @@ r.post('/login', async (req, res) => {
     });
     res.json({
       token,
-      user: { id: user.id, email: user.email, display_name: user.display_name, plan: user.plan },
+      user: {
+        id: user.id,
+        email: user.email,
+        display_name: user.display_name,
+        plan: user.plan,
+        timezone: user.timezone || 'UTC',
+      },
     });
   } catch (e) {
     console.error(e);
