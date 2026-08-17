@@ -28,6 +28,15 @@ type YtConn = {
   updated_at: string;
 };
 
+type TtConn = {
+  id: string;
+  open_id: string;
+  creator_username: string | null;
+  creator_nickname: string | null;
+  is_default: boolean;
+  updated_at: string;
+};
+
 const YOUTUBE_OAUTH_ERROR_HELP: Record<string, string> = {
   access_denied: 'Google sign-in was canceled or blocked. Try again and choose an account; if you use a Workspace org, an admin may need to allow this app.',
   google_oauth: 'Google returned an error during sign-in. Check the Google Cloud OAuth consent screen and authorized domains.',
@@ -53,17 +62,27 @@ const YOUTUBE_OAUTH_ERROR_HELP: Record<string, string> = {
   unknown: 'Something went wrong. Check the machine running the API logs when you click Connect and return from Google.',
 };
 
+type ReferralStats = {
+  my_code: string | null;
+  referred_users: { id: string; email: string; plan: string; created_at: string }[];
+};
+
 export default function Settings() {
   const { user, refreshUser } = useAuth();
   const [params] = useSearchParams();
   const yt = params.get('youtube');
+  const tik = params.get('tiktok');
   const rawReason = params.get('reason');
   const ytReason =
     rawReason && rawReason !== 'undefined' && rawReason !== 'null' ? rawReason : '';
   const [connections, setConnections] = useState<YtConn[]>([]);
+  const [tiktokConnections, setTiktokConnections] = useState<TtConn[]>([]);
   const [tz, setTz] = useState(user?.timezone || 'UTC');
   const [tzMsg, setTzMsg] = useState('');
   const [ytErr, setYtErr] = useState('');
+  const [tiktokErr, setTiktokErr] = useState('');
+  const [refStats, setRefStats] = useState<ReferralStats | null>(null);
+  const [refErr, setRefErr] = useState('');
 
   async function loadYoutube() {
     try {
@@ -76,8 +95,27 @@ export default function Settings() {
     }
   }
 
+  async function loadTiktok() {
+    try {
+      const d = await api<{ connections: TtConn[]; connected: boolean }>('/api/tiktok/status');
+      setTiktokConnections(d.connections || []);
+      setTiktokErr('');
+    } catch {
+      setTiktokConnections([]);
+      setTiktokErr('Could not load TikTok status');
+    }
+  }
+
   useEffect(() => {
     void loadYoutube();
+    void loadTiktok();
+  }, []);
+
+  useEffect(() => {
+    setRefErr('');
+    api<ReferralStats>('/api/referrals/stats')
+      .then((d) => setRefStats(d))
+      .catch(() => setRefErr('Could not load referral stats'));
   }, []);
 
   useEffect(() => {
@@ -86,6 +124,13 @@ export default function Settings() {
       void refreshUser();
     }
   }, [yt, refreshUser]);
+
+  useEffect(() => {
+    if (tik === 'connected' || tik === 'error') {
+      void loadTiktok();
+      void refreshUser();
+    }
+  }, [tik, refreshUser]);
 
   useEffect(() => {
     setTz(user?.timezone || 'UTC');
@@ -123,12 +168,51 @@ export default function Settings() {
     }
   }
 
+  async function connectTiktok() {
+    setTiktokErr('');
+    try {
+      const { url } = await api<{ url: string }>('/api/tiktok/auth-url');
+      window.location.href = url;
+    } catch (e) {
+      setTiktokErr(e instanceof Error ? e.message : 'Could not start TikTok OAuth');
+    }
+  }
+
+  async function setTiktokDefault(connId: string) {
+    setTiktokErr('');
+    try {
+      const d = await api<{ connections: TtConn[] }>(`/api/tiktok/connections/${connId}/default`, {
+        method: 'POST',
+      });
+      setTiktokConnections(d.connections);
+    } catch (e) {
+      setTiktokErr(e instanceof Error ? e.message : 'Failed');
+    }
+  }
+
+  async function disconnectTiktok(connId: string) {
+    setTiktokErr('');
+    try {
+      await api(`/api/tiktok/connections/${connId}`, { method: 'DELETE' });
+      await loadTiktok();
+    } catch (e) {
+      setTiktokErr(e instanceof Error ? e.message : 'Failed');
+    }
+  }
+
   async function saveTimezone() {
     setTzMsg('');
     try {
       await api('/api/auth/me', { method: 'PATCH', body: JSON.stringify({ timezone: tz }) });
       await refreshUser();
-      setTzMsg('Timezone saved. Schedule times in the editor are shown with this zone where noted.');
+      try {
+        localStorage.setItem('shorts_tz_bump', String(Date.now()));
+      } catch {
+        /* private mode */
+      }
+      setTzMsg(
+        'Timezone saved. Calendar, editor schedule labels, and diagnostics use this zone after refresh — other browser tabs pick it up automatically.'
+      );
     } catch (e) {
       setTzMsg(e instanceof Error ? e.message : 'Save failed');
     }
@@ -152,6 +236,51 @@ export default function Settings() {
             </>
           ) : null}
         </p>
+      </section>
+
+      <section className="card">
+        <h2>Referrals</h2>
+        <p className="hint">
+          Share your signup link. When someone creates an account with your code, we store the relationship for your
+          records.
+        </p>
+        {refErr && <p className="error">{refErr}</p>}
+        {refStats?.my_code ? (
+          <>
+            <p>
+              Your code: <code>{refStats.my_code}</code>
+            </p>
+            <p className="hint mono">
+              {typeof window !== 'undefined'
+                ? `${window.location.origin}/login?ref=${encodeURIComponent(refStats.my_code)}`
+                : null}
+            </p>
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={() => {
+                const link = `${window.location.origin}/login?ref=${encodeURIComponent(refStats.my_code || '')}`;
+                void navigator.clipboard.writeText(link).catch(() => {});
+              }}
+            >
+              Copy invite link
+            </button>
+            <h3 className="admin-subhead">Referred accounts</h3>
+            {refStats.referred_users?.length ? (
+              <ul>
+                {refStats.referred_users.map((u) => (
+                  <li key={u.id}>
+                    {u.email} · <span className="badge">{u.plan}</span> · joined {new Date(u.created_at).toLocaleDateString()}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="hint">No referred signups yet.</p>
+            )}
+          </>
+        ) : (
+          <p className="hint">No referral code on file yet — open the app again after registration.</p>
+        )}
       </section>
 
       <section className="card">
@@ -245,6 +374,59 @@ export default function Settings() {
 
         <button type="button" onClick={() => void connect()}>
           {connections.length ? 'Connect another Google account' : 'Connect with Google'}
+        </button>
+      </section>
+
+      <section className="card">
+        <h2>TikTok accounts</h2>
+        <p className="hint">
+          Uses TikTok&apos;s Content Posting API (direct post). Register an app at{' '}
+          <a href="https://developers.tiktok.com/" target="_blank" rel="noreferrer">
+            developers.tiktok.com
+          </a>
+          , add Login Kit + Content Posting, and set <code>TIKTOK_REDIRECT_URI</code> to an <strong>https</strong> URL
+          (TikTok rejects plain http) — e.g. <code>https://your-api.example.com/api/tiktok/oauth/callback</code>. Unaudited
+          apps may only post privately until TikTok completes app review.
+        </p>
+        {tik === 'connected' && <p className="success">TikTok linked — refresh if the list below is empty.</p>}
+        {tik === 'error' && (
+          <div className="error" role="alert">
+            <p>
+              <strong>TikTok connection failed.</strong> Check server logs for <code>[tiktok oauth]</code>, verify{' '}
+              <code>TIKTOK_CLIENT_KEY</code>, <code>TIKTOK_CLIENT_SECRET</code>, and redirect URI match the TikTok
+              portal, and that scopes include <code>video.publish</code>.
+            </p>
+            {rawReason ? <p className="hint">Reason code: {rawReason}</p> : null}
+          </div>
+        )}
+        {tiktokErr && <p className="error">{tiktokErr}</p>}
+        {tiktokConnections.length === 0 ? (
+          <p>No TikTok accounts connected yet.</p>
+        ) : (
+          <ul className="yt-conn-list">
+            {tiktokConnections.map((c) => (
+              <li key={c.id} className="yt-conn-item">
+                <div>
+                  <strong>{c.creator_nickname || c.creator_username || 'TikTok account'}</strong>
+                  {c.is_default && <span className="pill">default</span>}
+                  <div className="hint mono">{c.open_id}</div>
+                </div>
+                <div className="yt-conn-actions">
+                  {!c.is_default && (
+                    <button type="button" className="linkish" onClick={() => void setTiktokDefault(c.id)}>
+                      Set default
+                    </button>
+                  )}
+                  <button type="button" className="linkish" onClick={() => void disconnectTiktok(c.id)}>
+                    Disconnect
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        <button type="button" onClick={() => void connectTiktok()}>
+          {tiktokConnections.length ? 'Connect another TikTok account' : 'Connect TikTok'}
         </button>
       </section>
     </div>

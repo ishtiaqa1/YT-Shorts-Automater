@@ -9,7 +9,8 @@ import { getOAuthClient } from './youtubeUpload.js';
 export async function listRecentChannelVideosWithStudioFlag(userId, maxResults = 40) {
   const { rows: yc } = await pool.query(
     `SELECT refresh_token, channel_title FROM youtube_connections
-     WHERE user_id = $1 AND is_default = true
+     WHERE user_id = $1
+     ORDER BY is_default DESC NULLS LAST, updated_at DESC NULLS LAST
      LIMIT 1`,
     [userId]
   );

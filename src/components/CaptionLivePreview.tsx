@@ -2,6 +2,19 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { cssHex, normalizeCaptionHex } from '../captionColor';
 import { formatPreviewSubtitleText, type PreviewCaptionMode } from '../captionLayoutShared';
 
+/** Must match burn-in math in `server/services/captioning.js` (buildAssFromScript). */
+export function editorFontSizeToBurnInPreviewPx(fs: number) {
+  const n = Number(fs);
+  const base = Number.isFinite(n) ? n : 14;
+  return Math.min(180, Math.max(24, Math.round(base * 2.35)));
+}
+
+/** Must match ASS outline math in server/services/captioning.js */
+function previewOutlinePx(captions: CaptionSettings) {
+  const assFontSize = editorFontSizeToBurnInPreviewPx(captions.fontSize);
+  return Math.min(16, Math.max(captions.outline, Math.round(assFontSize * 0.07)));
+}
+
 type CaptionSettings = {
   fontSize: number;
   marginV: number;
@@ -42,11 +55,11 @@ export function CaptionLivePreview({ captions, previewText, mode = 'singleBeat',
 
   /** Match PlayRes 1080×1920 scaling (same as libass vs frame). */
   const scale = Math.min(dims.w / 1080, dims.h / 1920);
-  const fontPx = Math.max(8, captions.fontSize * scale);
+  const fontPx = Math.max(8, editorFontSizeToBurnInPreviewPx(captions.fontSize) * scale);
   const sidePad = captions.marginLR * scale;
   const nudgeY = -captions.marginV * scale;
-  /** ASS Outline is roughly this many pixels at PlayRes; thin stroke in browser */
-  const strokePx = Math.max(0, captions.outline * scale);
+  /** Match ASS Style outline scaling against the enlarged burn-in size. */
+  const strokePx = Math.max(0, previewOutlinePx(captions) * scale);
   const fill = cssHex(normalizeCaptionHex(captions.primaryColor, 'ffffff'));
   const strokeColor = cssHex(normalizeCaptionHex(captions.outlineColor, '000000'));
   const shadowDepth = Math.max(0, captions.shadow);
@@ -88,11 +101,13 @@ export function CaptionLivePreview({ captions, previewText, mode = 'singleBeat',
               fontFamily: '"Arial Black", "Helvetica Neue", Arial, sans-serif',
               fontWeight: 900,
               fontSize: `${fontPx}px`,
-              lineHeight: 1.08,
+              lineHeight: 1.13,
               letterSpacing: '0.01em',
               color: fill,
               WebkitTextStroke: strokePx > 0.15 ? `${strokePx}px ${strokeColor}` : undefined,
               paintOrder: strokePx > 0.15 ? 'stroke fill' : undefined,
+              transform: 'scaleX(1.18)',
+              transformOrigin: 'center center',
               whiteSpace: 'pre-wrap',
               wordBreak: 'break-word',
               overflowWrap: 'break-word',

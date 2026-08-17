@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../auth';
 
 export default function Login() {
   const { login, register, token, loading } = useAuth();
   const nav = useNavigate();
+  const [params] = useSearchParams();
+  const refCode = useMemo(() => params.get('ref'), [params]);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
@@ -15,12 +17,12 @@ export default function Login() {
     if (!loading && token) nav('/app', { replace: true });
   }, [loading, token, nav]);
 
-  async function submit(e: React.FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault();
     setErr('');
     try {
       if (mode === 'login') await login(email, password);
-      else await register(email, password, name || undefined);
+      else await register(email, password, name || undefined, refCode || undefined);
       nav('/app');
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : 'Failed');
@@ -30,7 +32,15 @@ export default function Login() {
   return (
     <div className="auth-page">
       <h1>Shorts Studio</h1>
-      <p className="lead">Text → voiceover · captions · gameplay background · YouTube</p>
+      <p className="lead">
+        Text → voiceover · captions · gameplay background · YouTube
+        {refCode ? (
+          <span className="hint">
+            {' '}
+            Referral applied: <code>{refCode}</code>
+          </span>
+        ) : null}
+      </p>
       <form onSubmit={submit} className="card">
         {mode === 'register' && (
           <label>

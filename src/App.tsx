@@ -8,6 +8,9 @@ import Editor from './pages/Editor';
 import Settings from './pages/Settings';
 import Billing from './pages/Billing';
 import Diagnostics from './pages/Diagnostics';
+import Calendar from './pages/Calendar';
+import Admin from './pages/Admin';
+import Templates from './pages/Templates';
 
 function Protected({ children }: { children: ReactNode }) {
   const { token, loading } = useAuth();
@@ -58,6 +61,30 @@ function AppRoutes() {
         element={
           <Protected>
             <Diagnostics />
+          </Protected>
+        }
+      />
+      <Route
+        path="/app/calendar"
+        element={
+          <Protected>
+            <Calendar />
+          </Protected>
+        }
+      />
+      <Route
+        path="/app/admin"
+        element={
+          <Protected>
+            <Admin />
+          </Protected>
+        }
+      />
+      <Route
+        path="/app/templates"
+        element={
+          <Protected>
+            <Templates />
           </Protected>
         }
       />

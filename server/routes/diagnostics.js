@@ -31,7 +31,8 @@ r.get('/', async (req, res) => {
     pool.query(
       `SELECT su.id, su.project_id, su.youtube_connection_id, su.youtube_video_id, su.scheduled_at,
               su.privacy_status, su.title, su.description, su.tags, su.status, su.last_error, su.created_at,
-              p.title AS project_title, p.status AS project_status
+              p.title AS project_title, p.status AS project_status,
+              COALESCE(su.platform, 'youtube') AS platform, su.tiktok_post_id
        FROM scheduled_uploads su
        JOIN projects p ON p.id = su.project_id
        WHERE su.user_id = $1
@@ -52,6 +53,20 @@ r.get('/', async (req, res) => {
     scheduled_uploads: scheduledRes.rows,
     channel_videos: channelVideos,
   });
+});
+
+/** Latest YouTube Analytics snapshots (from cron → upload_diagnostics). */
+r.get('/analytics', async (req, res) => {
+  const limit = Math.min(500, Math.max(10, Number(req.query.limit) || 120));
+  const { rows } = await pool.query(
+    `SELECT recorded_at, value_json
+     FROM upload_diagnostics
+     WHERE user_id = $1 AND metric = 'analytics_snapshot'
+     ORDER BY recorded_at DESC
+     LIMIT $2`,
+    [req.user.sub, limit]
+  );
+  res.json({ snapshots: rows });
 });
 
 r.get('/uploads', async (req, res) => {

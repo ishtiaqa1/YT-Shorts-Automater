@@ -15,6 +15,9 @@ export type User = {
   display_name: string | null;
   plan: string;
   timezone?: string;
+  onboarding_completed?: boolean;
+  referral_code?: string | null;
+  subscription_ends_at?: string | null;
 };
 
 type AuthState = {
@@ -22,7 +25,7 @@ type AuthState = {
   token: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, display_name?: string) => Promise<void>;
+  register: (email: string, password: string, display_name?: string, referral_from?: string) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
 };
@@ -60,15 +63,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(data.user);
   }, []);
 
-  const register = useCallback(async (email: string, password: string, display_name?: string) => {
-    const data = await api<{ token: string; user: User }>('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify({ email, password, display_name }),
-    });
-    localStorage.setItem('token', data.token);
-    setToken(data.token);
-    setUser(data.user);
-  }, []);
+  const register = useCallback(
+    async (email: string, password: string, display_name?: string, referral_from?: string) => {
+      const body: Record<string, unknown> = { email, password, display_name };
+      if (referral_from?.trim()) body.referral_from = referral_from.trim().toUpperCase();
+      const data = await api<{ token: string; user: User }>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      localStorage.setItem('token', data.token);
+      setToken(data.token);
+      setUser(data.user);
+    },
+    []
+  );
 
   const logout = useCallback(() => {
     localStorage.removeItem('token');
@@ -82,6 +90,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const d = await api<{ user: User }>('/api/auth/me');
     setUser(d.user);
   }, []);
+
+  /** Other tabs bump `shorts_tz_bump` after saving timezone; tab focus also re-syncs `/me`. */
+  useEffect(() => {
+    let visTimer: ReturnType<typeof setTimeout> | undefined;
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== 'shorts_tz_bump') return;
+      void refreshUser();
+    };
+    const onVis = () => {
+      if (document.visibilityState !== 'visible') return;
+      clearTimeout(visTimer);
+      visTimer = setTimeout(() => {
+        void refreshUser();
+      }, 400);
+    };
+    window.addEventListener('storage', onStorage);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      document.removeEventListener('visibilitychange', onVis);
+      clearTimeout(visTimer);
+    };
+  }, [refreshUser]);
 
   const value = useMemo(
     () => ({

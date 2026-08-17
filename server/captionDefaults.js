@@ -29,15 +29,15 @@ export function normalizeCaptionSettings(raw) {
   const legacyCue =
     typeof o.maxCharsPerCue === 'number' ? Math.max(4, Math.round(o.maxCharsPerCue / 7)) : undefined;
   return {
-    /** Scaled in PlayRes 1080×1920 — larger reads better on phones. */
-    fontSize: clamp(o.fontSize ?? 28, 14, 52),
+    /** Editor slider (14–72); mapped to ASS size in `captioning.js` / preview. */
+    fontSize: clamp(o.fontSize ?? 14, 14, 72),
     /**
      * With Alignment=5 (middle center), marginV is a small vertical nudge in libass (0 ≈ optic center).
      * Legacy projects stored huge values for bottom anchoring — remap so center layout isn’t pushed off-screen.
      */
     marginV: normalizeMarginV(o.marginV),
     /** Inset from left/right (px) in ASS; 0 = use full frame width for text. Also used for line-wrap math. */
-    marginLR: clamp(o.marginLR ?? 4, 0, 220),
+    marginLR: clamp(o.marginLR ?? 0, 0, 220),
     outline: clamp(o.outline ?? 4, 0, 12),
     /** Fill / stroke colours as RRGGBB (no '#'); preview + ASS PrimaryColour / OutlineColour. */
     primaryColor: normalizeCaptionHex(o.primaryColor, 'ffffff'),
@@ -50,7 +50,7 @@ export function normalizeCaptionSettings(raw) {
       16
     ),
     maxWordsPerCue: clamp(
-      typeof o.maxWordsPerCue === 'number' ? o.maxWordsPerCue : legacyCue ?? 16,
+      typeof o.maxWordsPerCue === 'number' ? o.maxWordsPerCue : legacyCue ?? 12,
       4,
       80
     ),

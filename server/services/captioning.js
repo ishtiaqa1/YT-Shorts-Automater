@@ -1,16 +1,18 @@
 /**
- * Timed captions for Shorts: word-based cues; margin-aware line width via captionLayout.
- * Export as ASS so FFmpeg/libass honors middle-center alignment (SRT + force_style often renders bottom).
+ * Timed captions: word-level beats; margin-aware line width; ASS for libass center alignment.
  */
 import { hexToAssBgr } from '../captionColor.js';
 import { normalizeCaptionSettings } from '../captionDefaults.js';
+import { resolveCaptionStylePreset } from '../captionStyles.js';
 import {
   computeMaxCharsPerLineFromMargins,
-  splitTextIntoWordCues,
   wrapCueToLines,
 } from '../captionLayout.js';
 
 /**
+ * Timed caption cues grouped by words-per-cue (not single-word flashes).
+ * Allocates timeline proportionally by character mass; each cue gets a readable minimum duration.
+ *
  * @param {string} script
  * @param {number} durationSec
  * @param {Record<string, unknown> | null | undefined} [captionSettingsRaw]
@@ -25,35 +27,52 @@ export function buildTimedCaptionBlocks(script, durationSec, captionSettingsRaw)
     return [{ text: '.', startMs: 0, endMs: 1000 }];
   }
 
-  const sentences = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
-  const chunks = sentences.length > 0 ? sentences : [clean];
+  const words = clean.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return [{ text: '.', startMs: 0, endMs: 1000 }];
+  }
 
-  const totalChars = chunks.reduce((n, c) => n + c.length, 0) || 1;
-  let msCursor = 0;
+  const maxWordsPerCue = Math.max(1, Math.round(s.maxWordsPerCue || 16));
+  /** @type {{ plain: string; mass: number }[]} */
+  const cues = [];
+  for (let i = 0; i < words.length; i += maxWordsPerCue) {
+    const part = words.slice(i, i + maxWordsPerCue);
+    const plain = part.join(' ');
+    const cueMass = part.reduce((n, w) => n + Math.max(1, w.length), 0);
+    cues.push({ plain, mass: cueMass });
+  }
+
+  const durMs = Math.round(durationSec * 1000);
+  const totalMass = cues.reduce((a, c) => a + c.mass, 0) || 1;
+  const minCueMs = 220;
+
+  /** @type {number[]} */
+  let shares = cues.map((c) => Math.max(minCueMs, (c.mass / totalMass) * durMs));
+  let sumShares = shares.reduce((a, b) => a + b, 0);
+  if (sumShares <= 0) sumShares = 1;
+  if (Math.abs(sumShares - durMs) > 2) {
+    const scale = durMs / sumShares;
+    shares = shares.map((x) => Math.max(minCueMs, Math.round(x * scale)));
+    sumShares = shares.reduce((a, b) => a + b, 0);
+  }
+  const drift = durMs - sumShares;
+  if (cues.length === 1) {
+    shares = [durMs];
+  } else if (drift !== 0) {
+    shares[cues.length - 1] = Math.max(minCueMs, shares[cues.length - 1] + drift);
+  }
+
   /** @type {{ text: string, startMs: number, endMs: number }[]} */
   const rawBlocks = [];
-
-  chunks.forEach((sentence, i) => {
-    const share = sentence.length / totalChars;
-    let chunkMs = Math.round(durationSec * 1000 * share);
-    if (i === chunks.length - 1) {
-      chunkMs = Math.max(0, Math.round(durationSec * 1000) - msCursor);
-    }
-    const segStart = msCursor;
-    const segEnd = Math.min(msCursor + chunkMs, Math.round(durationSec * 1000));
-    msCursor = segEnd;
-
-    const cueTexts = splitTextIntoWordCues(sentence, s.maxWordsPerCue);
-    const span = Math.max(1, segEnd - segStart);
-    const n = cueTexts.length;
-
-    cueTexts.forEach((cuePlain, j) => {
-      const text = wrapCueToLines(cuePlain, s.maxWordsPerLine, maxCharsHard);
-      const startMs = Math.round(segStart + (span * j) / n);
-      const endMs = Math.round(segStart + (span * (j + 1)) / n);
-      rawBlocks.push({ text, startMs, endMs: Math.max(startMs + 1, endMs) });
-    });
-  });
+  let t = 0;
+  for (let i = 0; i < cues.length; i++) {
+    const startMs = Math.round(t);
+    t += shares[i];
+    const endMs = i === cues.length - 1 ? durMs : Math.min(durMs, Math.round(t));
+    const plain = cues[i].plain;
+    const text = wrapCueToLines(plain, s.maxWordsPerLine, maxCharsHard);
+    rawBlocks.push({ text, startMs, endMs: Math.max(startMs + 1, endMs) });
+  }
 
   return rawBlocks;
 }
@@ -75,20 +94,30 @@ export function buildSrtFromScript(script, durationSec, captionSettingsRaw) {
 }
 
 /**
- * ASS subtitles with Style Alignment=5 (middle center). Required for centered burn-in; SRT often stays bottom.
+ * ASS subtitles with Style Alignment=5 (middle center).
  * @param {string} script
  * @param {number} durationSec
  * @param {Record<string, unknown> | null | undefined} [captionSettingsRaw]
+ * @param {string | null | undefined} [captionStyleKey] — preset id (bold_pop, …)
+ * @param {number} [startOffsetMs] - delay first cue to align with spoken onset
  */
-export function buildAssFromScript(script, durationSec, captionSettingsRaw) {
+export function buildAssFromScript(script, durationSec, captionSettingsRaw, captionStyleKey, startOffsetMs = 0) {
   const s = normalizeCaptionSettings(captionSettingsRaw);
+  const { preset } = resolveCaptionStylePreset(captionStyleKey);
   const blocks = buildTimedCaptionBlocks(script, durationSec, captionSettingsRaw);
 
-  /** ASS colours: &HAABBGGRR */
+  /** User colours + font size from editor; font family / bold from preset. */
   const primary = hexToAssBgr(s.primaryColor);
   const outlineC = hexToAssBgr(s.outlineColor);
-  /** Unused for BorderStyle=1 outline, but required in Style row */
   const back = '&H00000000';
+  const bold = preset.bold ? -1 : 0;
+  /**
+   * Map editor slider (14–72) to ASS FontSize in PlayRes 1080×1920.
+   * Keep in sync with `editorFontSizeToBurnInPreviewPx` in `src/components/CaptionLivePreview.tsx`.
+   */
+  const assFontSize = Math.min(180, Math.max(24, Math.round(s.fontSize * 2.35)));
+  /** Thicker outline at large sizes so glyphs stay readable on vertical video. */
+  const outlineW = Math.min(16, Math.max(s.outline, Math.round(assFontSize * 0.07)));
 
   const header = [
     '[Script Info]',
@@ -100,17 +129,18 @@ export function buildAssFromScript(script, durationSec, captionSettingsRaw) {
     '',
     '[V4+ Styles]',
     'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-    `Style: Default,Arial Black,${s.fontSize},${primary},&H000000FF,${outlineC},${back},-1,0,0,0,100,100,0,0,1,${s.outline},${s.shadow},5,${s.marginLR},${s.marginLR},${s.marginV},1`,
+    `Style: Default,${preset.fontName},${assFontSize},${primary},&H000000FF,${outlineC},${back},${bold},0,0,0,118,118,0,0,1,${outlineW},${s.shadow},5,${s.marginLR},${s.marginLR},${s.marginV},1`,
     '',
     '[Events]',
     'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
   ].join('\n');
 
   const lines = blocks.map((b) => {
-    const start = formatAssTs(b.startMs);
-    const end = formatAssTs(Math.max(b.startMs + 50, b.endMs));
-    /** {\an5} = middle-center; belts-and-suspenders with Style Alignment=5 for libass/ffmpeg. */
-    const body = `{\\an5}${escapeAssText(b.text)}`;
+    const startAt = Math.max(0, Math.round(b.startMs + startOffsetMs));
+    const endAt = Math.max(startAt + 50, Math.round(b.endMs + startOffsetMs));
+    const start = formatAssTs(startAt);
+    const end = formatAssTs(endAt);
+    const body = `{\\an5\\fs${assFontSize}}${escapeAssText(b.text)}`;
     return `Dialogue: 0,${start},${end},Default,,0,0,0,,${body}`;
   });
 

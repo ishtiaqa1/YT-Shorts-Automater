@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
+import { useAuth } from '../auth';
 
 export default function Billing() {
   const [params] = useSearchParams();
   const [msg, setMsg] = useState('');
+  const { user, refreshUser } = useAuth();
+
+  useEffect(() => {
+    void refreshUser();
+  }, [refreshUser]);
 
   useEffect(() => {
     if (params.get('success')) setMsg('Checkout completed — webhook should upgrade your plan shortly.');
@@ -27,6 +33,20 @@ export default function Billing() {
         <Link to="/app">← App</Link>
       </header>
       <section className="card">
+        <h2>Current plan</h2>
+        <p>
+          You are on <strong>{user?.plan === 'pro' ? 'Pro' : 'Free'}</strong>.
+          {user?.subscription_ends_at ? (
+            <>
+              {' '}
+              Pro access through{' '}
+              <strong>{new Date(user.subscription_ends_at).toLocaleString()}</strong> (Stripe cancel-at-period-end).
+            </>
+          ) : null}
+        </p>
+      </section>
+
+      <section className="card">
         <h2>Pro plan</h2>
         <p>
           Checkout uses your backend (<code>POST /api/billing/checkout</code>). Set env vars, then use the button below.
@@ -47,8 +67,10 @@ export default function Billing() {
           </li>
           <li>
             <strong>STRIPE_WEBHOOK_SECRET</strong> — Developers → Webhooks → add endpoint{' '}
-            <code>https://your-api/api/billing/webhook</code>, event <code>checkout.session.completed</code>, copy signing
-            secret. For local dev: install{' '}
+            <code>https://your-api/api/billing/webhook</code>, events such as{' '}
+            <code>checkout.session.completed</code>, <code>customer.subscription.updated</code>,{' '}
+            <code>customer.subscription.deleted</code>, and optionally <code>invoice.payment_succeeded</code>, then copy the
+            signing secret. For local dev: install{' '}
             <a href="https://stripe.com/docs/stripe-cli" target="_blank" rel="noreferrer">
               Stripe CLI
             </a>{' '}
@@ -64,9 +86,26 @@ export default function Billing() {
           <code>plan = pro</code> on your user.
         </p>
         {msg && <p className="success">{msg}</p>}
-        <button type="button" onClick={() => checkout()}>
-          Upgrade with Stripe
-        </button>
+        <div className="billing-actions">
+          <button type="button" onClick={() => checkout()}>
+            Upgrade with Stripe
+          </button>
+          <button
+            type="button"
+            className="secondary-btn"
+            onClick={async () => {
+              setMsg('');
+              try {
+                const { url } = await api<{ url: string }>('/api/billing/portal', { method: 'POST' });
+                if (url) window.location.href = url;
+              } catch (e) {
+                setMsg(e instanceof Error ? e.message : 'Could not open billing portal');
+              }
+            }}
+          >
+            Manage subscription
+          </button>
+        </div>
       </section>
     </div>
   );

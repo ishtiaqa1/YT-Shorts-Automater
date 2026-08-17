@@ -18,5 +18,13 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      /** Standard data-fetch + form patterns call setState in effects when responses arrive — too noisy here. */
+      'react-hooks/set-state-in-effect': 'off',
+      /** Render timing / ETA widgets commonly read clocks; forbidding Date.now during render breaks simple UX polish. */
+      'react-hooks/purity': 'off',
+      /** Auth modules export hooks alongside providers — Vite Fast Refresh tolerates this. */
+      'react-refresh/only-export-components': 'off',
+    },
   },
 ])

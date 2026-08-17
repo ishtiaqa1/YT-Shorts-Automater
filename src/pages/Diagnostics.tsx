@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api';
+import { ResponsiveContainer, BarChart, Bar, CartesianGrid, XAxis, YAxis, Tooltip } from 'recharts';
+import { api, apiDeleteSchedule } from '../api';
+import { describeYoutubeUploadError } from '../youtubeUploadErrors';
 import { useAuth } from '../auth';
 
 type ActivityRow = {
@@ -20,6 +22,8 @@ type ScheduledRow = {
   id: string;
   project_id: string;
   youtube_video_id: string | null;
+  tiktok_post_id?: string | null;
+  platform?: string | null;
   scheduled_at: string;
   privacy_status: string | null;
   title: string | null;
@@ -58,6 +62,8 @@ type RawEvent = {
   recorded_at: string;
 };
 
+type AnalyticsSnap = { recorded_at: string; value_json: unknown };
+
 function formatWhen(iso: string | null | undefined, timeZone: string) {
   if (!iso) return '—';
   try {
@@ -74,8 +80,27 @@ function formatWhen(iso: string | null | undefined, timeZone: string) {
 function statusBadgeClass(status: string) {
   if (status === 'uploaded' || status === 'ready') return 'badge ready';
   if (status === 'failed') return 'badge failed';
-  if (status === 'rendering' || status === 'pending') return 'badge rendering';
+  if (status === 'rendering' || status === 'pending' || status === 'uploading') return 'badge rendering';
   return 'badge';
+}
+
+function latestMetricsByVideo(rows: AnalyticsSnap[]) {
+  const latest = new Map<string, { video_id: string; views: number; likes: number }>();
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const r = rows[i];
+    const j =
+      typeof r.value_json === 'object' && r.value_json != null && !Array.isArray(r.value_json)
+        ? (r.value_json as Record<string, unknown>)
+        : {};
+    const vid = String(j.videoId ?? j.video_id ?? '').trim();
+    if (!vid || latest.has(vid)) continue;
+    latest.set(vid, {
+      video_id: vid.length > 10 ? `${vid.slice(0, 6)}…` : vid,
+      views: Number(j.views) || 0,
+      likes: Number(j.likes) || 0,
+    });
+  }
+  return [...latest.values()].sort((a, b) => b.views - a.views).slice(0, 18);
 }
 
 export default function Diagnostics() {
@@ -87,25 +112,68 @@ export default function Diagnostics() {
   const [scheduled, setScheduled] = useState<ScheduledRow[]>([]);
   const [channelVideos, setChannelVideos] = useState<ChannelVideosPayload | null>(null);
   const [rawEvents, setRawEvents] = useState<RawEvent[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsSnap[]>([]);
+  const [scheduleRmErr, setScheduleRmErr] = useState('');
+  const [rmScheduleId, setRmScheduleId] = useState<string | null>(null);
+  const removingScheduleIdsRef = useRef(new Set<string>());
+
+  const loadDiagnostics = useCallback(async () => {
+    setLoadErr('');
+    setScheduleRmErr('');
+    try {
+      const [d, a] = await Promise.all([
+        api<{
+          activity: ActivityRow[];
+          upload_summary: { status: string; n: number }[];
+          scheduled_uploads: ScheduledRow[];
+          channel_videos: ChannelVideosPayload;
+          events: RawEvent[];
+        }>('/api/diagnostics'),
+        api<{ snapshots: AnalyticsSnap[] }>('/api/diagnostics/analytics').catch(() => ({ snapshots: [] })),
+      ]);
+      setActivity(d.activity || []);
+      setSummary(d.upload_summary || []);
+      setScheduled(d.scheduled_uploads || []);
+      setChannelVideos(d.channel_videos || { ok: false, items: [], message: null });
+      setRawEvents(d.events || []);
+      setAnalytics(a.snapshots || []);
+    } catch {
+      setLoadErr('Could not load diagnostics.');
+    }
+  }, []);
 
   useEffect(() => {
-    setLoadErr('');
-    api<{
-      activity: ActivityRow[];
-      upload_summary: { status: string; n: number }[];
-      scheduled_uploads: ScheduledRow[];
-      channel_videos: ChannelVideosPayload;
-      events: RawEvent[];
-    }>('/api/diagnostics')
-      .then((d) => {
-        setActivity(d.activity || []);
-        setSummary(d.upload_summary || []);
-        setScheduled(d.scheduled_uploads || []);
-        setChannelVideos(d.channel_videos || { ok: false, items: [], message: null });
-        setRawEvents(d.events || []);
-      })
-      .catch(() => setLoadErr('Could not load diagnostics.'));
-  }, []);
+    void loadDiagnostics();
+  }, [loadDiagnostics]);
+
+  async function removeScheduledRow(s: ScheduledRow) {
+    const sid = String(s.id);
+    if (removingScheduleIdsRef.current.has(sid) || s.status === 'uploading') return;
+    removingScheduleIdsRef.current.add(sid);
+
+    const st = String(s.status || '').toLowerCase();
+    const skipConfirm = st === 'failed' || st === 'pending';
+    if (
+      !skipConfirm &&
+      !window.confirm(
+        `Remove this scheduled row from the database?\n\n"${(s.title || s.project_title || 'Untitled').slice(0, 120)}"`
+      )
+    ) {
+      removingScheduleIdsRef.current.delete(sid);
+      return;
+    }
+    setScheduleRmErr('');
+    setRmScheduleId(sid);
+    try {
+      await apiDeleteSchedule(sid);
+      await loadDiagnostics();
+    } catch (e) {
+      setScheduleRmErr(e instanceof Error ? e.message : 'Could not remove schedule');
+    } finally {
+      removingScheduleIdsRef.current.delete(sid);
+      setRmScheduleId(null);
+    }
+  }
 
   return (
     <div className="page">
@@ -120,6 +188,31 @@ export default function Diagnostics() {
       </p>
 
       {loadErr && <p className="error">{loadErr}</p>}
+      {scheduleRmErr ? <p className="error">{scheduleRmErr}</p> : null}
+
+      <section className="card">
+        <h2>YouTube Analytics snapshots</h2>
+        <p className="hint">
+          Latest synced metrics per video (requires Analytics scope + channel with uploads from this app; cron inserts
+          rows into diagnostics).
+        </p>
+        {analytics.length === 0 ? (
+          <p className="hint">No analytics rows yet.</p>
+        ) : (
+          <div style={{ width: '100%', height: 280 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={latestMetricsByVideo(analytics)}>
+                <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                <XAxis dataKey="video_id" tick={{ fontSize: 10 }} angle={-20} height={54} interval={0} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
+                <Bar dataKey="views" fill="#f43f5e" radius={[4, 4, 0, 0]} name="Views" />
+                <Bar dataKey="likes" fill="#818cf8" radius={[4, 4, 0, 0]} name="Likes" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </section>
 
       <section className="card">
         <h2>Publish queue summary</h2>
@@ -175,7 +268,11 @@ export default function Diagnostics() {
 
       <section className="card">
         <h2>Scheduled uploads (detail)</h2>
-        <p className="hint">Each row is a publish you set up from the editor. Only successful runs get a YouTube video ID.</p>
+        <p className="hint">
+          Each row is a publish you set up from the editor. Successful runs show a YouTube video ID and/or a TikTok post
+          ID. Use Remove to delete rows; <strong>failed</strong> and <strong>pending</strong> remove in one click (same
+          as Calendar).
+        </p>
         {scheduled.length === 0 ? (
           <p className="hint">None yet.</p>
         ) : (
@@ -187,8 +284,10 @@ export default function Diagnostics() {
                   <th>Publish at</th>
                   <th>Project</th>
                   <th>Title</th>
+                  <th>Platform</th>
                   <th>Status</th>
-                  <th>YouTube</th>
+                  <th>Link</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -201,17 +300,46 @@ export default function Diagnostics() {
                       <div className="hint">Project status: {s.project_status}</div>
                     </td>
                     <td>{s.title || '—'}</td>
+                    <td>{s.platform === 'tiktok' ? 'TikTok' : 'YouTube'}</td>
                     <td>
                       <span className={statusBadgeClass(s.status)}>{s.status}</span>
-                      {s.last_error ? <div className="error diag-err">{s.last_error}</div> : null}
+                      {s.last_error ? (
+                        <div className="error diag-err">{describeYoutubeUploadError(s.last_error)}</div>
+                      ) : null}
                     </td>
                     <td>
                       {s.youtube_video_id ? (
                         <a href={`https://www.youtube.com/watch?v=${encodeURIComponent(s.youtube_video_id)}`} target="_blank" rel="noreferrer">
-                          {s.youtube_video_id}
+                          YouTube
                         </a>
-                      ) : (
+                      ) : null}
+                      {s.tiktok_post_id ? (
+                        <>
+                          {s.youtube_video_id ? <span className="hint"> · </span> : null}
+                          <a
+                            href={`https://www.tiktok.com/video/${encodeURIComponent(s.tiktok_post_id)}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            TikTok
+                          </a>
+                        </>
+                      ) : null}
+                      {!s.youtube_video_id && !s.tiktok_post_id ? <span className="hint">—</span> : null}
+                    </td>
+                    <td>
+                      {s.status === 'uploading' ? (
                         <span className="hint">—</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          style={{ fontSize: '0.82rem', padding: '0.25rem 0.5rem' }}
+                          disabled={rmScheduleId === s.id}
+                          onClick={() => void removeScheduledRow(s)}
+                        >
+                          {rmScheduleId === s.id ? 'Removing…' : 'Remove'}
+                        </button>
                       )}
                     </td>
                   </tr>
